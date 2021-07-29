@@ -1,0 +1,7 @@
+apiVersion: meta.pkg.ndd.henderiw.be/v1
+kind: Provider
+metadata:
+  name: ndd-provider-sros
+spec:
+  controller:
+    image: henderiw/ndd-provider-sros-controller:latest
