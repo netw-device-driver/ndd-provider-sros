@@ -4,8 +4,8 @@ go 1.16
 
 require (
 	github.com/netw-device-driver/ndd-core v0.1.8
-	github.com/netw-device-driver/ndd-grpc v0.1.0
-	github.com/netw-device-driver/ndd-runtime v0.3.72
+	github.com/netw-device-driver/ndd-grpc v0.1.6
+	github.com/netw-device-driver/ndd-runtime v0.3.78
 	github.com/netw-device-driver/netwdevpb v0.1.27
 	github.com/pkg/errors v0.9.1
 	github.com/spf13/cobra v1.2.1

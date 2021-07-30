@@ -20,11 +20,6 @@ package v1
 
 import nddv1 "github.com/netw-device-driver/ndd-runtime/apis/common/v1"
 
-// DeleteTargetCondition of this Registration.
-func (mg *Registration) DeleteTargetCondition(target string) {
-	delete(mg.Status.TargetConditions, target)
-}
-
 // GetActive of this Registration.
 func (mg *Registration) GetActive() bool {
 	return mg.Spec.Active
@@ -45,14 +40,9 @@ func (mg *Registration) GetNetworkNodeReference() *nddv1.Reference {
 	return mg.Spec.NetworkNodeReference
 }
 
-// GetTargetCondition of this Registration.
-func (mg *Registration) GetTargetCondition(target string, ck nddv1.ConditionKind) nddv1.Condition {
-	return mg.Status.TargetConditions[target].GetCondition(ck)
-}
-
-// InitializeTargetConditions of this Registration.
-func (mg *Registration) InitializeTargetConditions() {
-	mg.Status.TargetConditions = make(map[string]*nddv1.TargetConditions)
+// GetTarget of this Registration.
+func (mg *Registration) GetTarget() []string {
+	return mg.Status.Target
 }
 
 // SetActive of this Registration.
@@ -75,10 +65,7 @@ func (mg *Registration) SetNetworkNodeReference(r *nddv1.Reference) {
 	mg.Spec.NetworkNodeReference = r
 }
 
-// SetTargetConditions of this Registration.
-func (mg *Registration) SetTargetConditions(target string, c ...nddv1.Condition) {
-	if mg.Status.TargetConditions[target] == nil {
-		mg.Status.TargetConditions[target] = new(nddv1.TargetConditions)
-	}
-	mg.Status.TargetConditions[target].SetConditions(c...)
+// SetTarget of this Registration.
+func (mg *Registration) SetTarget(t []string) {
+	mg.Status.Target = t
 }

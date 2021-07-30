@@ -18,19 +18,20 @@ package sros
 
 import (
 	"context"
-	"fmt"
 	"strconv"
 	"time"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	ndrv1 "github.com/netw-device-driver/ndd-core/apis/dvr/v1"
 	"github.com/netw-device-driver/ndd-grpc/ndd"
 	regclient "github.com/netw-device-driver/ndd-grpc/register/client"
 	register "github.com/netw-device-driver/ndd-grpc/register/registerpb"
 	srosv1 "github.com/netw-device-driver/ndd-provider-sros/apis/sros/v1"
+	nddv1 "github.com/netw-device-driver/ndd-runtime/apis/common/v1"
 	"github.com/netw-device-driver/ndd-runtime/pkg/event"
 	"github.com/netw-device-driver/ndd-runtime/pkg/logging"
 	"github.com/netw-device-driver/ndd-runtime/pkg/meta"
@@ -38,17 +39,11 @@ import (
 	"github.com/netw-device-driver/ndd-runtime/pkg/resource"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
 )
 
 const (
 	// Finalizer
 	RegistrationFinalizer = "Registration.sros.ndd.henderiw.be"
-
-	// Timers
-	//reconcileTimeout = 1 * time.Minute
-	//shortWait        = 30 * time.Second
-	//veryShortWait    = 5 * time.Second
 
 	// Errors
 	errUnexpectedObject   = "the managed resource is not a Registration resource"
@@ -62,62 +57,8 @@ const (
 	errRegistrationCreate = "cannot create Registration"
 	errRegistrationUpdate = "cannot update Registration"
 	errRegistrationDelete = "cannot delete Registration"
-
-	// old erros
-	//errGetRegistration             = "cannot get Registration"
-	//errAddRegistrationFinalizer    = "cannot add Registration finalizer"
-	//errRemoveRegistrationFinalizer = "cannot remove Registration finalizer"
-	//errUpdateRegistrationStatus    = "cannot update Registration status"
-	//errRegistrationFailed          = "cannot register to the device driver"
-	//errDeRegistrationFailed        = "cannot desregister to the device driver"
-	//errCacheStatusFailed           = "cannot get cache status from the device driver"
-
-	// Event reasons
-	//reasonSync event.Reason = "SyncRegistration"
+	errNoTargetFound      = "target not found"
 )
-
-/*
-// RegistrationReconcilerOption is used to configure the RegistrationReconciler.
-type RegistrationReconcilerOption func(*RegistrationReconciler)
-
-// WithLogger specifies how the Reconciler should log messages.
-func WithLogger(log logging.Logger) RegistrationReconcilerOption {
-	return func(r *RegistrationReconciler) {
-		r.log = log
-	}
-}
-
-// WithRecorder specifies how the Reconciler should record Kubernetes events.
-func WithRecorder(er event.Recorder) RegistrationReconcilerOption {
-	return func(r *RegistrationReconciler) {
-		r.record = er
-	}
-}
-
-// WithValidator specifies how the Reconciler should perform object
-// validation.
-func WithValidator(v Validator) RegistrationReconcilerOption {
-	return func(r *RegistrationReconciler) {
-		r.validator = v
-	}
-}
-
-func WithGrpcApplicator(a gclient.Applicator) RegistrationReconcilerOption {
-	return func(r *RegistrationReconciler) {
-		r.applicator = a
-	}
-}
-
-// RegistrationReconciler reconciles a Registration object
-type RegistrationReconciler struct {
-	client     client.Client
-	finalizer  resource.Finalizer
-	validator  Validator
-	log        logging.Logger
-	record     event.Recorder
-	applicator gclient.Applicator
-}
-*/
 
 // SetupRegistration adds a controller that reconciles Registrations.
 func SetupRegistration(mgr ctrl.Manager, o controller.Options, l logging.Logger, poll time.Duration, namespace string) error {
@@ -127,10 +68,12 @@ func SetupRegistration(mgr ctrl.Manager, o controller.Options, l logging.Logger,
 	r := managed.NewReconciler(mgr,
 		resource.ManagedKind(srosv1.RegistrationGroupVersionKind),
 		managed.WithExternalConnecter(&connector{
+			log:         l,
 			kube:        mgr.GetClient(),
 			usage:       resource.NewNetworkNodeUsageTracker(mgr.GetClient(), &ndrv1.NetworkNodeUsage{}),
 			newClientFn: regclient.NewClient},
 		),
+		managed.WithValidator(&validator{log: l}),
 		managed.WithReferenceResolver(managed.NewAPISimpleReferenceResolver(mgr.GetClient())),
 		managed.WithLogger(l.WithValues("controller", name)),
 		managed.WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorderFor(name))))
@@ -140,53 +83,44 @@ func SetupRegistration(mgr ctrl.Manager, o controller.Options, l logging.Logger,
 		WithOptions(o).
 		For(&srosv1.Registration{}).
 		WithEventFilter(resource.IgnoreUpdateWithoutGenerationChangePredicate()).
-		//Watches(
-		//	&source.Kind{Type: &ndrv1.NetworkNode{}},
-		//	handler.EnqueueRequestsFromMapFunc(r.NetworkNodeMapFunc),
-		//).
+		Watches(
+			&source.Kind{Type: &ndrv1.NetworkNode{}},
+			&resource.EnqueueRequestForNetworkNode{}).
 		Complete(r)
+}
 
-	/*
-		r := NewRegistrationReconciler(mgr,
-			WithLogger(l.WithValues("controller", name)),
-			WithRecorder(event.NewAPIRecorder(mgr.GetEventRecorderFor(name))),
-			WithValidator(NewTargetValidator(resource.ClientApplicator{
-				Client:     mgr.GetClient(),
-				Applicator: resource.NewAPIPatchingApplicator(mgr.GetClient()),
-			}, l)),
-			WithGrpcApplicator(gclient.NewClientApplicator(
-				gclient.WithLogger(l.WithValues("gclient", name)),
-				gclient.WithInsecure(true),
-				gclient.WithSkipVerify(true),
-			)),
-		)
+type validator struct {
+	log logging.Logger
+}
 
-		return ctrl.NewControllerManagedBy(mgr).
-			Named(name).
-			For(&srosv1.Registration{}).
-			WithEventFilter(resource.IgnoreUpdateWithoutGenerationChangePredicate()).
-			WithOptions(option).
-			Watches(
-				&source.Kind{Type: &ndrv1.NetworkNode{}},
-				handler.EnqueueRequestsFromMapFunc(r.NetworkNodeMapFunc),
-			).
-			Complete(r)
-	*/
+func (v *validator) ValidateLocalleafRef(ctx context.Context, mg resource.Managed) (managed.ValidateLocalleafRefObservation, error) {
+	return managed.ValidateLocalleafRefObservation{Success: true}, nil
+}
+
+func (v *validator) ValidateExternalleafRef(ctx context.Context, mg resource.Managed, cfg []byte) (managed.ValidateExternalleafRefObservation, error) {
+	return managed.ValidateExternalleafRefObservation{Success: true}, nil
+}
+
+func (v *validator) ValidateParentDependency(ctx context.Context, mg resource.Managed, cfg []byte) (managed.ValidationParentDependencyObservation, error) {
+	return managed.ValidationParentDependencyObservation{Success: true}, nil
 }
 
 // A connector is expected to produce an ExternalClient when its Connect method
 // is called.
 type connector struct {
+	log         logging.Logger
 	kube        client.Client
 	usage       resource.Tracker
-	newClientFn func(ctx context.Context, creds ndd.Config) (register.RegistrationClient, error)
+	newClientFn func(ctx context.Context, cfg ndd.Config) (register.RegistrationClient, error)
 }
 
 // Connect produces an ExternalClient by:
 // 1. Tracking that the managed resource is using a TargetConfig.
 // 2. Getting the managed resource's TargetConfig with connection details
 func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.ExternalClient, error) {
-	cr, ok := mg.(*srosv1.Registration)
+	log := c.log.WithValues("resosurce", mg.GetName())
+	log.Debug("Connect")
+	_, ok := mg.(*srosv1.Registration)
 	if !ok {
 		return nil, errors.New(errUnexpectedObject)
 	}
@@ -194,36 +128,62 @@ func (c *connector) Connect(ctx context.Context, mg resource.Managed) (managed.E
 		return nil, errors.Wrap(err, errTrackTCUsage)
 	}
 
-	//pc := &v1.TargetConfig{}
-	//if err := c.kube.Get(ctx, types.NamespacedName{Name: cr.GetTargetConfigReference().Name}, pc); err != nil {
-	//	return nil, errors.Wrap(err, errGetTC)
-	//}
-
-	nn := &ndrv1.NetworkNode{}
-	if err := c.kube.Get(ctx, types.NamespacedName{Name: cr.GetNetworkNodeReference().Name}, nn); err != nil {
+	selectors := []client.ListOption{}
+	nnl := &ndrv1.NetworkNodeList{}
+	if err := c.kube.List(ctx, nnl, selectors...); err != nil {
 		return nil, errors.Wrap(err, errGetNetworkNode)
 	}
 
-	if nn.GetCondition(ndrv1.ConditionKindDeviceDriverConfigured).Status != corev1.ConditionTrue {
-		return nil, errors.New(targetNotConfigured)
+	// find all targets that have are in configured status
+	var ts []*nddv1.Target
+	for _, nn := range nnl.Items {
+		log.Debug("Network Node", "Name", nn.GetName(), "Status", nn.GetCondition(ndrv1.ConditionKindDeviceDriverConfigured).Status)
+		if nn.GetCondition(ndrv1.ConditionKindDeviceDriverConfigured).Status == corev1.ConditionTrue {
+			t := &nddv1.Target{
+				Name: nn.GetName(),
+				Cfg: ndd.Config{
+					SkipVerify: true,
+					Insecure:   true,
+					Target:     ndrv1.PrefixService + "-" + nn.Name + "." + ndrv1.NamespaceLocalK8sDNS + strconv.Itoa(*nn.Spec.GrpcServerPort),
+				},
+			}
+			ts = append(ts, t)
+		}
+	}
+	log.Debug("Active targets", "targets", ts)
+
+	// when no targets are found we return a not found error
+	// this unifies the reconcile code when a dedicate network node is looked up
+	if len(ts) == 0 {
+		return nil, errors.New(errNoTargetFound)
 	}
 
-	cl, err := c.newClientFn(ctx, ndd.Config{
-		SkipVerify: true,
-		Insecure:   true,
-		Target:     ndrv1.PrefixService + "-" + nn.Name + "." + ndrv1.NamespaceLocalK8sDNS + strconv.Itoa(*nn.Spec.GrpcServerPort),
-	})
-	if err != nil {
-		return nil, errors.Wrap(err, errNewClient)
+	// We dont have to update the deletion since the network device driver would have lost
+	// its state already
+
+	//get clients for each target
+	cls := make([]register.RegistrationClient, 0)
+	tns := make([]string, 0)
+	for _, t := range ts {
+		cl, err := c.newClientFn(ctx, t.Cfg)
+		if err != nil {
+			return nil, errors.Wrap(err, errNewClient)
+		}
+		cls = append(cls, cl)
+		tns = append(tns, t.Name)
 	}
 
-	return &external{client: cl}, nil
+	log.Debug("Connect info", "clients", cls, "targets", tns)
+
+	return &external{clients: cls, targets: tns, log: log}, nil
 }
 
 // An ExternalClient observes, then either creates, updates, or deletes an
 // external resource to ensure it reflects the managed resource's desired state.
 type external struct {
-	client register.RegistrationClient
+	clients []register.RegistrationClient
+	targets []string
+	log     logging.Logger
 }
 
 func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.ExternalObservation, error) {
@@ -238,276 +198,107 @@ func (e *external) Observe(ctx context.Context, mg resource.Managed) (managed.Ex
 		}, nil
 	}
 
-	// These fmt statements should be removed in the real implementation.
-	fmt.Printf("Observing: %+v", o)
-
-	r, err := e.client.Read(ctx, &register.DeviceType{
-		DeviceType: string(srosv1.DeviceTypeSROS),
-	})
-	if err != nil {
-		return managed.ExternalObservation{}, errors.New(errRegistrationRead)
+	for _, cl := range e.clients {
+		r, err := cl.Get(ctx, &register.DeviceType{
+			DeviceType: string(srosv1.DeviceTypeSROS),
+		})
+		if err != nil {
+			// if a single network device driver reports an error this is applicable to all
+			// network devices
+			return managed.ExternalObservation{}, errors.New(errRegistrationRead)
+		}
+		// if a network device driver reports a different device type we trigger
+		// a recreation of the configuration on all devices by returning
+		// Exists = false and
+		if r.DeviceType != string(srosv1.DeviceTypeSROS) {
+			return managed.ExternalObservation{
+				ResourceExists:    false,
+				ResourceUpToDate:  false,
+				ConnectionDetails: managed.ConnectionDetails{},
+			}, nil
+		}
 	}
 
-	if r.DeviceType == string(srosv1.DeviceTypeSROS) {
-		return managed.ExternalObservation{
-			ResourceExists:    true,
-			ResourceUpToDate:  true,
-			ConnectionDetails: managed.ConnectionDetails{},
-		}, nil
-	} else {
-		return managed.ExternalObservation{
-			ResourceExists:    false,
-			ResourceUpToDate:  false,
-			ConnectionDetails: managed.ConnectionDetails{},
-		}, nil
-	}
+	// when all network device driver reports the proper device type
+	// we return exists and up to date
+	return managed.ExternalObservation{
+		ResourceExists:    true,
+		ResourceUpToDate:  true,
+		ConnectionDetails: managed.ConnectionDetails{},
+	}, nil
+
 }
 
 func (e *external) Create(ctx context.Context, mg resource.Managed) (managed.ExternalCreation, error) {
-	o, ok := mg.(*srosv1.Registration)
+	cr, ok := mg.(*srosv1.Registration)
 	if !ok {
 		return managed.ExternalCreation{}, errors.New(errUnexpectedObject)
 	}
 
-	fmt.Printf("Creating: %+v", o)
+	e.log.Debug("creating", "object", cr)
 
-	_, err := e.client.Create(ctx, &register.RegistrationInfo{
-		DeviceType:             string(srosv1.DeviceTypeSROS),
-		MatchString:            srosv1.DeviceMatch,
-		Subscriptions:          o.GetSubscriptions(),
-		ExcpetionPaths:         o.GetExceptionPaths(),
-		ExplicitExceptionPaths: o.GetExplicitExceptionPaths(),
-	})
-	if err != nil {
-		return managed.ExternalCreation{}, errors.New(errRegistrationCreate)
+	for _, cl := range e.clients {
+		_, err := cl.Create(ctx, &register.Request{
+			DeviceType:             string(srosv1.DeviceTypeSROS),
+			MatchString:            srosv1.DeviceMatch,
+			Subscriptions:          cr.GetSubscriptions(),
+			ExceptionPaths:         cr.GetExceptionPaths(),
+			ExplicitExceptionPaths: cr.GetExplicitExceptionPaths(),
+		})
+		if err != nil {
+			return managed.ExternalCreation{}, errors.New(errRegistrationCreate)
+		}
 	}
 
-	return managed.ExternalCreation{
-		// Optionally return any details that may be required to connect to the
-		// external resource. These will be stored as the connection secret.
-		ConnectionDetails: managed.ConnectionDetails{},
-	}, nil
+	return managed.ExternalCreation{}, nil
 }
 
 func (e *external) Update(ctx context.Context, mg resource.Managed) (managed.ExternalUpdate, error) {
-	o, ok := mg.(*srosv1.Registration)
+	cr, ok := mg.(*srosv1.Registration)
 	if !ok {
 		return managed.ExternalUpdate{}, errors.New(errUnexpectedObject)
 	}
 
-	fmt.Printf("Updating: %+v", o)
+	e.log.Debug("creating", "object", cr)
 
-	_, err := e.client.Update(ctx, &register.RegistrationInfo{
-		DeviceType:             string(srosv1.DeviceTypeSROS),
-		MatchString:            srosv1.DeviceMatch,
-		Subscriptions:          o.GetSubscriptions(),
-		ExcpetionPaths:         o.GetExceptionPaths(),
-		ExplicitExceptionPaths: o.GetExplicitExceptionPaths(),
-	})
-	if err != nil {
-		return managed.ExternalUpdate{}, errors.New(errRegistrationUpdate)
+	for _, cl := range e.clients {
+		_, err := cl.Update(ctx, &register.Request{
+			DeviceType:             string(srosv1.DeviceTypeSROS),
+			MatchString:            srosv1.DeviceMatch,
+			Subscriptions:          cr.GetSubscriptions(),
+			ExceptionPaths:         cr.GetExceptionPaths(),
+			ExplicitExceptionPaths: cr.GetExplicitExceptionPaths(),
+		})
+		if err != nil {
+			return managed.ExternalUpdate{}, errors.New(errRegistrationUpdate)
+		}
 	}
-
-	return managed.ExternalUpdate{
-		ConnectionDetails: managed.ConnectionDetails{},
-	}, nil
+	return managed.ExternalUpdate{}, nil
 }
 
 func (e *external) Delete(ctx context.Context, mg resource.Managed) error {
-	o, ok := mg.(*srosv1.Registration)
+	cr, ok := mg.(*srosv1.Registration)
 	if !ok {
 		return errors.New(errUnexpectedObject)
 	}
 
-	fmt.Printf("Deleting: %+v", o)
+	e.log.Debug("deleting", "object", cr)
 
-	_, err := e.client.Delete(ctx, &register.DeviceType{
-		DeviceType: string(srosv1.DeviceTypeSROS),
-	})
-	if err != nil {
-		return errors.New(errRegistrationDelete)
+	for _, cl := range e.clients {
+		_, err := cl.Delete(ctx, &register.DeviceType{
+			DeviceType: string(srosv1.DeviceTypeSROS),
+		})
+		if err != nil {
+			return errors.New(errRegistrationDelete)
+		}
 	}
-
 	return nil
 }
 
-/*
-// NewRegistrationReconciler creates a new package revision reconciler.
-func NewRegistrationReconciler(mgr manager.Manager, opts ...RegistrationReconcilerOption) *RegistrationReconciler {
-	r := &RegistrationReconciler{
-		client:    mgr.GetClient(),
-		finalizer: resource.NewAPIFinalizer(mgr.GetClient(), RegistrationFinalizer),
-		log:       logging.NewNopLogger(),
-		record:    event.NewNopRecorder(),
-	}
-	for _, f := range opts {
-		f(r)
-	}
-	return r
+func (e *external) GetTarget() []string {
+	return e.targets
 }
 
-// NetworkNodeMapFunc is a handler.ToRequestsFunc to be used to enqeue
-// request for reconciliation of Registration.
-func (r *RegistrationReconciler) NetworkNodeMapFunc(o client.Object) []ctrl.Request {
-	log := r.log.WithValues("NetworkNode Object", o)
-	result := []ctrl.Request{}
-
-	nn, ok := o.(*ndrv1.NetworkNode)
-	if !ok {
-		panic(fmt.Sprintf("Expected a NodeTopology but got a %T", o))
-	}
-	log.WithValues(nn.GetName(), nn.GetNamespace()).Info("NetworkNode MapFunction")
-
-	selectors := []client.ListOption{
-		client.InNamespace(nn.Namespace),
-		client.MatchingLabels{},
-	}
-	ss := &srosv1.RegistrationList{}
-	if err := r.client.List(context.TODO(), ss, selectors...); err != nil {
-		return result
-	}
-
-	for _, o := range ss.Items {
-		name := client.ObjectKey{
-			Namespace: o.GetNamespace(),
-			Name:      o.GetName(),
-		}
-		log.WithValues(o.GetName(), o.GetNamespace()).Info("NetworkNodeMapFunc Registration ReQueue")
-		result = append(result, ctrl.Request{NamespacedName: name})
-	}
-	return result
+func (e *external) GetConfig(ctx context.Context) ([]byte, error) {
+	return make([]byte, 0), nil
 }
-
-//+kubebuilder:rbac:groups=dvr.ndd.henderiw.be,resources=networknodes,verbs=get;list;watch
-//+kubebuilder:rbac:groups=sros.ndd.henderiw.be,resources=registrations,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=sros.ndd.henderiw.be,resources=registrations/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=sros.ndd.henderiw.be,resources=registrations/finalizers,verbs=update
-
-func (r *RegistrationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	//log := r.log.FromContext(ctx)
-	log := r.log.WithValues("Registration", req.NamespacedName)
-	log.Debug("reconciling Registration")
-
-	o := &srosv1.Registration{}
-	if err := r.client.Get(ctx, req.NamespacedName, o); err != nil {
-		// There's no need to requeue if we no longer exist. Otherwise we'll be
-		// requeued implicitly because we return an error.
-		log.Debug(errGetRegistration, "error", err)
-		return reconcile.Result{}, errors.Wrap(resource.IgnoreNotFound(err), errGetRegistration)
-	}
-	log.Debug("Registration", "Sub", o)
-
-	if meta.WasDeleted(o) {
-		// find the available targets and deregister the provider
-		targets, err := r.validator.FindConfigured(ctx, o.Spec.TargetConfigReference.Name)
-		if err != nil {
-			log.Debug(nddv1.ErrFindingTargets, "error", err)
-			r.record.Event(o, event.Warning(reasonSync, errors.Wrap(err, nddv1.ErrFindingTargets)))
-			return reconcile.Result{RequeueAfter: reconcileTimeout}, errors.Wrap(r.client.Status().Update(ctx, o), errUpdateRegistrationStatus)
-		}
-		for _, target := range targets {
-			// register the provider to the device driver
-			_, err := r.applicator.DeRegister(ctx, target.DNS,
-				&netwdevpb.RegistrationRequest{
-					DeviceType:  string(srosv1.DeviceTypesros),
-					MatchString: srosv1.DeviceMatch,
-				})
-			if err != nil {
-				log.Debug(errDeRegistrationFailed)
-				r.record.Event(o, event.Warning(reasonSync, errors.Wrap(err, fmt.Sprintf("%s, target, %s", errDeRegistrationFailed, target))))
-				return reconcile.Result{RequeueAfter: shortWait}, errors.Wrap(err, fmt.Sprintf("%s, target, %s", errDeRegistrationFailed, target))
-			}
-		}
-
-		// Delete finalizer after all device drivers are deregistered
-		if err := r.finalizer.RemoveFinalizer(ctx, o); err != nil {
-			log.Debug(errRemoveRegistrationFinalizer, "error", err)
-			r.record.Event(o, event.Warning(reasonSync, errors.Wrap(err, errRemoveRegistrationFinalizer)))
-			return reconcile.Result{RequeueAfter: shortWait}, errors.Wrap(err, errRemoveRegistrationFinalizer)
-		}
-		return reconcile.Result{Requeue: false}, nil
-	}
-
-	if err := r.finalizer.AddFinalizer(ctx, o); err != nil {
-		log.Debug(errAddRegistrationFinalizer, "error", err)
-		r.record.Event(o, event.Warning(reasonSync, errors.Wrap(err, errAddRegistrationFinalizer)))
-		return reconcile.Result{RequeueAfter: shortWait}, errors.Wrap(err, errAddRegistrationFinalizer)
-	}
-
-	log = log.WithValues(
-		"uid", o.GetUID(),
-		"version", o.GetResourceVersion(),
-		"name", o.GetName(),
-	)
-
-	// find targets the resource should be applied to
-	targets, err := r.validator.FindConfigured(ctx, o.Spec.TargetConfigReference.Name)
-	if err != nil {
-		log.Debug(nddv1.ErrTargetNotFound, "error", err)
-		r.record.Event(o, event.Warning(reasonSync, errors.Wrap(err, nddv1.ErrTargetNotFound)))
-		o.SetConditions(nddv1.TargetNotFound())
-		return reconcile.Result{RequeueAfter: reconcileTimeout}, errors.Wrap(r.client.Status().Update(ctx, o), errUpdateRegistrationStatus)
-	}
-
-	// check if targets got deleted and if so delete them from the status
-	for targetName := range o.Status.TargetConditions {
-		if r.validator.IfDeleted(ctx, targets, targetName) {
-			o.DeleteTargetCondition(targetName)
-			log.Debug(nddv1.InfoTargetDeleted, "target", targetName)
-			r.record.Event(o, event.Normal(reasonSync, nddv1.InfoTargetDeleted, "target", targetName))
-		}
-	}
-
-	// if no targets are found we return and update object status with no target found
-	if len(targets) == 0 {
-		log.Debug(nddv1.ErrTargetNotFound)
-		r.record.Event(o, event.Warning(reasonSync, errors.New(nddv1.ErrTargetNotFound)))
-		o.SetConditions(nddv1.TargetNotFound())
-		return reconcile.Result{RequeueAfter: reconcileTimeout}, errors.Wrap(r.client.Status().Update(ctx, o), errUpdateRegistrationStatus)
-	}
-	// otherwise register the provider to the device driver
-	r.record.Event(o, event.Normal(reasonSync, nddv1.InfoTargetFound))
-	o.SetConditions(nddv1.TargetFound())
-
-	for _, target := range targets {
-		log.Debug("RegistrationTargets", "target", target)
-		// initialize the targets ConditionedStatus
-		if len(o.Status.TargetConditions) == 0 {
-			o.InitializeTargetConditions()
-		}
-
-		// set condition if not yet set
-		if _, ok := o.Status.TargetConditions[target.Name]; !ok {
-			log.Debug("Initialize target condition")
-			o.SetTargetConditions(target.Name, nddv1.Unknown())
-		}
-
-		// update the device driver with the object info when the condition is not met yet
-		log.Debug("targetconditionStatus", "status", o.GetTargetCondition(target.Name, nddv1.ConditionKindConfiguration).Status)
-		if o.GetTargetCondition(target.Name, nddv1.ConditionKindConfiguration).Status == corev1.ConditionFalse ||
-			o.GetTargetCondition(target.Name, nddv1.ConditionKindConfiguration).Status == corev1.ConditionUnknown {
-
-			// register the provider to the device driver
-			rsp, err := r.applicator.Register(ctx, target.DNS,
-				&netwdevpb.RegistrationRequest{
-					DeviceType:             string(srosv1.DeviceTypesros),
-					MatchString:            srosv1.DeviceMatch,
-					Subscriptions:          o.GetSubscriptions(),
-					ExcpetionPaths:         o.GetExceptionPaths(),
-					ExplicitExceptionPaths: o.GetExplicitExceptionPaths(),
-				})
-			if err != nil {
-				log.Debug(errRegistrationFailed)
-				r.record.Event(o, event.Warning(reasonSync, errors.Wrap(err, errRegistrationFailed)))
-				return reconcile.Result{RequeueAfter: shortWait}, errors.Wrap(r.client.Status().Update(ctx, o), errUpdateRegistrationStatus)
-
-			}
-			log.Debug("Register", "response", rsp)
-			log.Debug("Object status", "status", o.Status)
-			o.SetTargetConditions(target.Name, nddv1.ReconcileSuccess())
-		}
-	}
-	// update the status and return
-	return reconcile.Result{Requeue: false, RequeueAfter: reconcileTimeout}, errors.Wrap(r.client.Status().Update(ctx, o), errUpdateRegistrationStatus)
-}
-*/
